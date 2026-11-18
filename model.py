@@ -51,6 +51,7 @@ CLASS_AGREE = 2.0        # weight multiplier when unlock classes agree
 CLASS_DISAGREE = 0.45    # ... and when they disagree
 SHAPE_SHRINK_K = 3.0     # shape *= n_eff / (n_eff + K): thin evidence -> persistence
 RESID_NORMAL_BLEND = 0.5 # residual quantiles: half empirical, half fitted normal
+MAX_WEIGHT_SHARE = 0.25  # no single comparable may exceed this share of total weight
 
 
 def parse_time(text):
@@ -163,12 +164,39 @@ def weighted_quantile(pairs, tau):
     return pts[-1][0]
 
 
+def cap_weight_shares(weights):
+    """Weights rescaled so no single comparable exceeds MAX_WEIGHT_SHARE of the total.
+
+    The Gaussian kernel can hand one comparable nearly all the weight when its
+    features land almost exactly on the target's (distance ~ 0 while the rest of
+    the pool sits a scale away). DATA.md's shape families differ by orders of
+    magnitude — a global-unlock curve peaks at 60x-2000x hour 1, a rolling one at
+    1.3x-12x — so a one-launch pool is a family bet, not evidence: the weighted
+    median shape and the residual pool would both be that single launch. Capping
+    the over-share weights at the cap and repeating until the cap holds
+    (water-filling) keeps the pool a pool, while the usual case — 37 launches,
+    no weight near the cap — is left exactly untouched.
+    """
+    weights = list(weights)
+    for _ in range(100):
+        total = sum(weights)
+        if total <= 0:
+            break
+        cap = MAX_WEIGHT_SHARE * total
+        if max(weights) <= cap * (1 + 1e-12):
+            break
+        weights = [min(w, cap) for w in weights]
+    return weights
+
+
 def similarity_weights(target_feats, target_class, pool):
     """Gaussian-kernel weights of the pool [(feats, curve, class)] for the target.
 
     Features are standardised by the pool's own spread, so the kernel measures
     distance in 'typical variation' units; features missing on either side are
-    skipped for that pair. Also returns the effective sample size (sum w)^2/sum w^2.
+    skipped for that pair. The raw weights then pass through cap_weight_shares,
+    so no single comparable dominates the pool. Also returns the effective
+    sample size (sum w)^2/sum w^2 of the capped weights.
     """
     scales = []
     for j in range(3):
@@ -190,6 +218,7 @@ def similarity_weights(target_feats, target_class, pool):
         if target_class != "unknown" and cls != "unknown":
             w *= CLASS_AGREE if cls == target_class else CLASS_DISAGREE
         weights.append(w)
+    weights = cap_weight_shares(weights)
     total = sum(weights)
     n_eff = (total * total / sum(w * w for w in weights)) if total > 0 else 0.0
     return weights, n_eff
