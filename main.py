@@ -1,32 +1,22 @@
-"""gta6-twitch-ccu-forecast-01's starter in Python 3.13 (standard library only): persistence.
+"""gta6-twitch-ccu-forecast-01 entry: comparable-shape quantile regression (see model.py).
 
-The same program as starter/main.ts (the house baseline), number for number and byte for byte: it forecasts that every
-hour of release day draws as many concurrent Twitch viewers in the Grand Theft Auto VI category as hour 1 did, with a
-spread that widens like a random walk's in log space:
+The house baseline forecasts persistence: every hour equals hour 1's viewers, with a
+random-walk spread. This entry instead reads the case's 38 comparable launches, takes
+the empirical distribution of their release-day log-ratio curves log v(h) - log v(1),
+weighted by checkpoint-knowable similarity to the target (hour-1 scale, pre-release
+peak/mean ratios, unlock pattern), and reports that distribution's quantiles around a
+similarity-weighted median shape. All in log space, because the score is pinball loss
+on log viewers. Method and evidence: DATA.md and model.py.
 
-    q_tau(h) = p1 * exp(z_tau * 0.15 * sqrt(h - 1)), rounded to 2 decimals (half up)
+Contract (unchanged from the starter): read every <id>.in in the input directory;
+write <id>.out as {"hours": [{"hour": 2, "q": [q05, q25, q50, q75, q95]}, ...]} with
+exactly the 23 rows for hours 2..24, five finite non-decreasing quantiles per row,
+each above 0 and at most 1e9, at most 65,536 bytes. Standard library only; the grader
+runs `python3 -P -s /bot/main.py`, so the sys.path line below puts this file's
+directory first and `import model` finds the model.py shipped beside it.
 
-for the hours h = 2..24 of the UTC day, where p1 is hour 1's print (the case's `known` row for hour 1; a print below 1
-counts as 1) and z_tau is the standard normal's quantile at each level (0.05, 0.25, 0.5, 0.75, 0.95):
--1.645, -0.674, 0, 0.674, 1.645.
-
-How the grader runs it: `python3 -P -s /bot/main.py` (PYTHONHASHSEED=0) in python:3.13-slim, standard library only: no
-network, no pip packages. -P keeps this file's directory OFF sys.path, so a module you ship beside main.py (say
-/bot/model.py) imports only after the sys.path line below, which puts the directory first; -s drops user
-site-packages.
-
-What an entry must do:
-  - read every <id>.in in the input directory (the grader runs one case at a time, with only that case's file there):
-    JSON {"schema": "makefun/twitch-ccu-case/v1", "id", "game", "day_start", "checkpoint", "levels", "known",
-    "forecast", "history", "history_hourly", "streams", "categories_hourly", "comparables", "notes"}, where `known`
-    holds hour 1's print {hour: 1, from, until, viewers, channels, reads} and `forecast` lists the hours to forecast,
-    2..24;
-  - write <id>.out to the output directory: {"hours": [{"hour": 2, "q": [q05, q25, q50, q75, q95]}, ...]}, exactly 23
-    rows, hours 2..24 each once, no other key, each q five finite numbers above 0 and at most 1e9 (viewers; fractions
-    allowed), non-decreasing; at most 65,536 bytes. Anything else is an invalid case, scored as if every quantile
-    equalled hour 1's print, and an entry with an invalid case takes no prize.
-
-Outside the grader's container, MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR stand in for /input and /output:
+Outside the grader's container, MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR stand in
+for /input and /output:
     mkdir -p out && MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out python3 main.py
 """
 
@@ -39,15 +29,13 @@ from pathlib import Path
 # The grader's -P leaves /bot off sys.path: put it back first, so `import model` finds a model.py shipped beside this file.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import model
+
 INPUT_DIR = Path(os.environ.get("MAKEFUN_INPUT_DIR", "/input"))
 OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
 # The quantile levels the contest scores, in the order each row lists them.
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
-# The standard normal's quantile at each level.
-Z = [-1.645, -0.674, 0, 0.674, 1.645]
-# The spread of an hour's move, in natural-log units per square-root hour.
-SIGMA = 0.15
 
 
 def round2(x: float) -> float | int:
@@ -63,19 +51,15 @@ def round2(x: float) -> float | int:
     return int(value) if value.is_integer() else value
 
 
-def hour_quantiles(p1: float, h: int) -> list[float | int]:
-    """The persistence forecast of hour h: the five quantiles around hour 1's print."""
-    return [round2(p1 * math.exp(z * SIGMA * math.sqrt(h - 1))) for z in Z]
-
-
 def forecast_case(case: dict, name: str) -> dict:
     if case["levels"] != LEVELS:
         raise ValueError(f"{name} asks for levels {case['levels']}, not {LEVELS}")
-    first = next((k for k in case["known"] if k["hour"] == 1), None)
-    if first is None:
-        raise ValueError(f"{name} has no hour-1 print")
-    p1 = max(1, first["viewers"])
-    return {"hours": [{"hour": row["hour"], "q": hour_quantiles(p1, row["hour"])} for row in case["forecast"]]}
+    by_hour = model.forecast_case(case)
+    rows = []
+    for row in case["forecast"]:
+        qs = by_hour[row["hour"]]
+        rows.append({"hour": row["hour"], "q": [round2(q) for q in qs]})
+    return {"hours": rows}
 
 
 def main() -> None:
